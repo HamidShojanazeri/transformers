@@ -140,6 +140,7 @@ class FlaubertModel(XLMModel):
         super().__init__(config)
         self.layerdrop = getattr(config, "layerdrop", 0.0)
         self.pre_norm = getattr(config, "pre_norm", False)
+        self.register_buffer("position_ids", torch.arange(config.max_position_embeddings).expand((1, -1)))
 
     @add_start_docstrings_to_model_forward(FLAUBERT_INPUTS_DOCSTRING)
     @add_code_sample_docstrings(
@@ -197,15 +198,15 @@ class FlaubertModel(XLMModel):
         mask, attn_mask = get_masks(slen, lengths, self.causal, padding_mask=attention_mask)
         # if self.is_decoder and src_enc is not None:
         #     src_mask = torch.arange(src_len.max(), dtype=torch.long, device=lengths.device) < src_len[:, None]
-
+        position_ids = self.position_ids[:,:slen]
+        
         # position_ids
         if position_ids is None:
             position_ids = torch.arange(slen, dtype=torch.long, device=device)
             position_ids = position_ids.unsqueeze(0).expand((bs, slen))
         else:
             assert position_ids.size() == (bs, slen)  # (slen, bs)
-            # position_ids = position_ids.transpose(0, 1)
-
+#             position_ids = position_ids.transpose(0, 1)
         # langs
         if langs is not None:
             assert langs.size() == (bs, slen)  # (slen, bs)
