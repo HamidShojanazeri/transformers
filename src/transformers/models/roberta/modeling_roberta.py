@@ -105,9 +105,6 @@ class RobertaEmbeddings(nn.Module):
         seq_length = input_shape[1]
         position_ids = self.position_ids[:,:seq_length]
         
-        print(position_ids)
-        print(self.position_ids)
-       
         if token_type_ids is None:
             token_type_ids = torch.zeros(input_shape, dtype=torch.long, device=self.position_ids.device)
             
