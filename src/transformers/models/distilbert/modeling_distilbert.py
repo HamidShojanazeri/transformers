@@ -88,7 +88,8 @@ class Embeddings(nn.Module):
             create_sinusoidal_embeddings(
                 n_pos=config.max_position_embeddings, dim=config.dim, out=self.position_embeddings.weight
             )
-
+            
+        self.register_buffer("position_ids", torch.arange(config.max_position_embeddings).expand((1, -1)))
         self.LayerNorm = nn.LayerNorm(config.dim, eps=1e-12)
         self.dropout = nn.Dropout(config.dropout)
 
@@ -101,8 +102,7 @@ class Embeddings(nn.Module):
         embeddings)
         """
         seq_length = input_ids.size(1)
-        position_ids = torch.arange(seq_length, dtype=torch.long, device=input_ids.device)  # (max_seq_length)
-        position_ids = position_ids.unsqueeze(0).expand_as(input_ids)  # (bs, max_seq_length)
+        position_ids = self.position_ids[:,:seq_length] 
 
         word_embeddings = self.word_embeddings(input_ids)  # (bs, max_seq_length, dim)
         position_embeddings = self.position_embeddings(position_ids)  # (bs, max_seq_length, dim)
