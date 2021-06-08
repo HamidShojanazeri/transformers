@@ -23,6 +23,8 @@ Black, Stella Biderman, Leo Gao, Phil Wang and Connor Leahy. It is a GPT2 like c
 The architecture is similar to GPT2 except that GPT Neo uses local attention in every other layer with a window size of
 256 tokens.
 
+This model was contributed by `valhalla <https://huggingface.co/valhalla>`__.
+
 Generation
 _______________________________________________________________________________________________________________________
 
@@ -62,4 +64,10 @@ GPTNeoForCausalLM
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 .. autoclass:: transformers.GPTNeoForCausalLM
+    :members: forward
+
+GPTNeoForSequenceClassification
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. autoclass:: transformers.GPTNeoForSequenceClassification
     :members: forward

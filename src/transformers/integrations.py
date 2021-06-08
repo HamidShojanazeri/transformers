@@ -15,16 +15,11 @@
 Integrations with other Python libraries.
 """
 import importlib.util
-import io
-import json
 import numbers
 import os
-import sys
 import tempfile
-from copy import deepcopy
 from pathlib import Path
 
-from .dependency_versions_check import dep_version_check
 from .utils import logging
 
 
@@ -101,8 +96,8 @@ def is_fairscale_available():
     return importlib.util.find_spec("fairscale") is not None
 
 
-def is_deepspeed_available():
-    return importlib.util.find_spec("deepspeed") is not None
+def is_neptune_available():
+    return importlib.util.find_spec("neptune") is not None
 
 
 def hp_params(trial):
@@ -267,280 +262,6 @@ def rewrite_logs(d):
         else:
             new_d["train/" + k] = v
     return new_d
-
-
-_is_deepspeed_zero3_enabled = None
-
-
-def is_deepspeed_zero3_enabled():
-    """
-    This function answers to the question of whether DeepSpeed is going to be used and run using ZeRO Stage 3.
-
-    It includes an auto-discovery method, see comments in the code for details.
-
-    Returns: ``True`` if either it was explicitly enabled via ``deepspeed_zero3_enable(True)`` or the auto-detector was
-    able to derive that the ``Trainer`` will be running via DeepSpeed ZeRO stage 3.
-    """
-    global _is_deepspeed_zero3_enabled
-    if _is_deepspeed_zero3_enabled is None:
-        _is_deepspeed_zero3_enabled = False
-        # Try to auto-discover if we are about to use DeepSpeed with ZeRO3 enabled. This will only
-        # work for scripts using cli to pass --deepspeed ds_config.json. If cmd args aren't used,
-        # then to get the model efficiently loaded across multiple-gpus one has to explicitly call
-        # is_deepspeed_zero3_enabled(True) **before** instantiating a model object
-        if "--deepspeed" in sys.argv:
-            idx = sys.argv.index("--deepspeed")
-            ds_config = sys.argv[idx + 1]
-            if not os.path.exists(ds_config):
-                raise ValueError("--deepspeed requires a valid path to a config file")
-            config = deepspeed_parse_config(ds_config)
-            if (
-                "zero_optimization" in config
-                and "stage" in config["zero_optimization"]
-                and config["zero_optimization"]["stage"] == 3
-            ):
-                _is_deepspeed_zero3_enabled = True
-
-    return _is_deepspeed_zero3_enabled
-
-
-def deepspeed_zero3_enable(enable=True):
-    """
-    ``is_deepspeed_zero3_enabled()`` tries to derive automatically if DeepSpeed ZeRO 3 is going to be used by looking
-    at ``sys.argv`` which may or may contain information about where to find the DeepSpeed config if any.
-
-    This function allows for explicit enabling/disabling of this global flag.
-
-    Args:
-        enable: if set to ``True`` will make ``is_deepspeed_zero3_enabled()`` return ``True``
-    """
-    global _is_deepspeed_zero3_enabled
-    _is_deepspeed_zero3_enabled = enable
-
-
-def deepspeed_parse_config(ds_config):
-    """
-    If ``ds_config`` isn't already a dict, read it from the config file.
-
-    If it's already a dict, return a copy of it, so that we can freely modify it.
-    """
-    dep_version_check("deepspeed")
-
-    if isinstance(ds_config, dict):
-        # Don't modify user's data should they want to reuse it (e.g. in tests), because once we
-        # modified it, it will not be accepted here again, since some config params must be not set by users
-        config = deepcopy(ds_config)
-    elif isinstance(ds_config, str):
-        with io.open(ds_config, "r", encoding="utf-8") as f:
-            config = json.load(f)
-    else:
-        raise ValueError("expecting either a path to a config file or a pre-populated dict")
-
-    return config
-
-
-def deepspeed_init(trainer, num_training_steps, resume_from_checkpoint=None):
-    """
-    Init DeepSpeed, after updating the DeepSpeed configuration with any relevant Trainer's args.
-
-    If ``resume_from_checkpoint`` was passed then an attempt to resume from a previously saved checkpoint will be made.
-
-    Args:
-        trainer: Trainer object
-        num_training_steps: per single gpu
-        resume_from_checkpoint: path to a checkpoint if to resume from after normal DeepSpeedEngine load
-
-    Returns: model, optimizer, lr_scheduler
-
-    """
-    import deepspeed
-
-    args = trainer.args
-    model = trainer.model
-
-    config = deepspeed_parse_config(args.deepspeed)
-
-    # The following code translates relevant trainer's cl args into the DS config
-
-    # First to ensure that there is no mismatch between cl args values and presets in the config
-    # file, ask to not set in ds config file:
-    # - "train_batch_size",
-    # - "train_micro_batch_size_per_gpu",
-    # - "gradient_accumulation_steps"
-    bs_keys = ["train_batch_size", "train_micro_batch_size_per_gpu"]
-    if len([x for x in bs_keys if x in config.keys()]):
-        raise ValueError(
-            f"Do not include {bs_keys} entries in the ds config file, as they will be set via --per_device_train_batch_size or its default"
-        )
-    if "gradient_accumulation_steps" in config.keys():
-        raise ValueError(
-            "Do not include gradient_accumulation_steps entries in the ds config file, as they will be set via --gradient_accumulation_steps or its default"
-        )
-
-    # DeepSpeed does:
-    #   train_batch_size = n_gpus * train_micro_batch_size_per_gpu * gradient_accumulation_steps
-    # therefore we just need to set:
-    config["train_micro_batch_size_per_gpu"] = args.per_device_train_batch_size
-    config["gradient_accumulation_steps"] = args.gradient_accumulation_steps
-
-    if "gradient_clipping" in config:
-        logger.info("Keeping the `gradient_clipping` config intact, ignoring any gradient clipping-specific cl args")
-    else:  # override only if the ds config doesn't already have this section
-        config["gradient_clipping"] = args.max_grad_norm
-
-    # Optimizer + Scheduler
-    # Currently support combos:
-    # 1. DS scheduler + DS optimizer: Yes
-    # 2. HF scheduler + HF optimizer: Yes
-    # 3. DS scheduler + HF optimizer: Yes
-    # 4. HF scheduler + DS optimizer: No
-    #
-    # Unless Offload is enabled in which case it's:
-    # 1. DS scheduler + DS optimizer: Yes
-    # 2. HF scheduler + HF optimizer: No
-    # 3. DS scheduler + HF optimizer: No
-    # 4. HF scheduler + DS optimizer: No
-
-    optimizer = None
-    if "optimizer" in config:
-        logger.info("Updating the `scheduler` config with other command line arguments")
-
-        # to avoid inconsistent values of lr and warm up steps the command line args override config
-        params = dict(
-            lr=args.learning_rate,
-            betas=[args.adam_beta1, args.adam_beta2],
-            eps=args.adam_epsilon,
-            weight_decay=args.weight_decay,
-        )
-        for k, v in params.items():
-            if k in config["optimizer"]["params"]:
-                logger.info(f"setting optimizer.params.{k} to {v}")
-                config["optimizer"]["params"][k] = v
-
-    else:  # override only if the ds config doesn't already have this section
-        if (
-            "zero_optimization" in config
-            and "cpu_offload" in config["zero_optimization"]
-            and config["zero_optimization"]["cpu_offload"] is True
-        ):
-            raise ValueError("ZeRO Offload can only work with DeepSpeed optimizers")
-        else:
-            # ds supports Adam, OneBitAdam, and Lamb optimizers and can import other optimizers from torch.
-            # But trainer uses AdamW by default.
-            # To use other optimizers so using a different scheduler requires voiding warranty with: `zero_allow_untested_optimizer`
-            trainer.create_optimizer()
-            optimizer = trainer.optimizer
-            # flag that this is non-native optimizer
-            config["zero_allow_untested_optimizer"] = True
-
-    # DS schedulers (deepspeed/runtime/lr_schedules.py):
-    #
-    # DS name      | --lr_scheduler_type  | HF func                           | Notes
-    # -------------| ---------------------|-----------------------------------|--------------------
-    # LRRangeTest  | na                   | na                                | LRRT
-    # OneCycle     | na                   | na                                | 1CLR
-    # WarmupLR     | constant_with_warmup | get_constant_schedule_with_warmup | w/ warmup_min_lr=0
-    # WarmupDecayLR| linear               | get_linear_schedule_with_warmup   |
-    lr_scheduler = None
-    if "scheduler" in config:
-        logger.info("Updating the `scheduler` config with other command line arguments")
-        # the user won't easily know the correct num_training_steps should they use WarmupDecayLR,
-        # so let's set it to the correct value
-        if config["scheduler"]["type"] == "WarmupDecayLR":
-            logger.info(f"setting scheduler.params.total_num_steps to {num_training_steps}")
-            config["scheduler"]["params"]["total_num_steps"] = num_training_steps
-
-        # to avoid inconsistent values of lr and warmup steps the command line args override config
-        params = dict(
-            warmup_max_lr=args.learning_rate,
-            warmup_num_steps=args.warmup_steps,
-        )
-        for k, v in params.items():
-            if k in config["scheduler"]["params"]:
-                logger.info(f"setting scheduler.params.{k} to {v}")
-                config["scheduler"]["params"][k] = v
-
-    else:  # override only if the ds config doesn't already have this section
-        if "optimizer" in config:
-            # to make this option work, we need to init DS optimizer first, then init HS scheduler,
-            # then pass the HS scheduler to DS init, which is not possible at the moment
-            raise ValueError("At the moment HF scheduler + DeepSpeed optimizer combination is not possible")
-        else:
-            trainer.create_scheduler(num_training_steps=num_training_steps)
-            lr_scheduler = trainer.lr_scheduler
-
-    # fp16
-    if trainer.fp16_backend is not None:
-        # Deepspeed has 2 possible fp16 config entries:
-        # - `fp16`: for the native amp - it has a bunch of optional params but we won't set any here unless the user did the work
-        # - `amp`: which delegates amp work to apex (which needs to be available), but it cannot be used with any ZeRO features, so probably best to be avoided.
-        if trainer.fp16_backend == "apex":
-            if "amp" in config:
-                logger.info("Keeping the `amp` config intact, ignoring any amp-specific cl args")
-            else:
-                config["amp"] = {
-                    "enabled": True,
-                    "opt_level": args.fp16_opt_level,
-                }
-        elif trainer.fp16_backend == "amp":
-            if "fp16" in config:
-                logger.info("Keeping the `fp16` config intact, ignoring any fp16-specific cl args")
-            else:
-                config["fp16"] = {
-                    "enabled": True,
-                }
-
-    # zero
-    if "zero_optimization" in config:
-        zero = config["zero_optimization"]
-
-        # now we know for sure if zero3 is enabled
-        deepspeed_zero3_enable(zero.get("stage") == 3)
-
-        # automatically assign the optimal config values based on model config
-        hidden_size = model.config.hidden_size
-        if zero.get("reduce_bucket_size") == 0:
-            zero["reduce_bucket_size"] = hidden_size * hidden_size
-        if zero.get("stage3_prefetch_bucket_size") == 0:
-            zero["stage3_prefetch_bucket_size"] = 0.9 * hidden_size * hidden_size
-        if zero.get("stage3_param_persistence_threshold") == 0:
-            zero["stage3_param_persistence_threshold"] = 10 * hidden_size
-
-    # keep for quick debug:
-    # from pprint import pprint; pprint(config)
-
-    model_parameters = filter(lambda p: p.requires_grad, model.parameters())
-
-    model, optimizer, _, lr_scheduler = deepspeed.initialize(
-        model=model,
-        model_parameters=model_parameters,
-        config_params=config,
-        optimizer=optimizer,
-        lr_scheduler=lr_scheduler,
-    )
-
-    if resume_from_checkpoint is not None:
-
-        # it's possible that the user is trying to resume from model_path, which doesn't necessarily
-        # contain a deepspeed checkpoint. e.g. examples just check if the dir exists and assume it's
-        # a resume from a checkpoint and not just a local pretrained weight. So we check here if the
-        # path contains what looks like a deepspeed checkpoint
-        import glob
-
-        deepspeed_checkpoint_dirs = sorted(glob.glob(f"{resume_from_checkpoint}/global_step*"))
-
-        if len(deepspeed_checkpoint_dirs) > 0:
-            logger.info(f"Attempting to resume from {resume_from_checkpoint}")
-            # this magically updates self.optimizer and self.lr_scheduler
-            load_path, _ = model.load_checkpoint(
-                resume_from_checkpoint, load_optimizer_states=True, load_lr_scheduler_states=True
-            )
-            if load_path is None:
-                raise ValueError(f"[deepspeed] failed to resume from checkpoint {resume_from_checkpoint}")
-        else:
-            logger.info(f"{resume_from_checkpoint} doesn't have deepspeed checkpoints, doing nothing")
-
-    return model, optimizer, lr_scheduler
 
 
 class TensorBoardCallback(TrainerCallback):
@@ -710,6 +431,7 @@ class WandbCallback(TrainerCallback):
         hp_search = state.is_hyper_param_search
         if hp_search:
             self._wandb.finish()
+            self._initialized = False
         if not self._initialized:
             self.setup(args, state, model, **kwargs)
 
@@ -856,8 +578,8 @@ class MLflowCallback(TrainerCallback):
                 Whether to use MLflow .log_artifact() facility to log artifacts.
 
                 This only makes sense if logging to a remote server, e.g. s3 or GCS. If set to `True` or `1`, will copy
-                whatever is in TrainerArgument's output_dir to the local or remote artifact storage. Using it without a
-                remote storage will just copy the files to your artifact location.
+                whatever is in :class:`~transformers.TrainingArguments`'s ``output_dir`` to the local or remote
+                artifact storage. Using it without a remote storage will just copy the files to your artifact location.
         """
         log_artifacts = os.getenv("HF_MLFLOW_LOG_ARTIFACTS", "FALSE").upper()
         if log_artifacts in {"TRUE", "1"}:
@@ -917,10 +639,80 @@ class MLflowCallback(TrainerCallback):
             self._ml_flow.end_run()
 
 
+class NeptuneCallback(TrainerCallback):
+    """
+    A :class:`~transformers.TrainerCallback` that sends the logs to `Neptune <https://neptune.ai>`.
+    """
+
+    def __init__(self):
+        assert (
+            is_neptune_available()
+        ), "NeptuneCallback requires neptune-client to be installed. Run `pip install neptune-client`."
+        import neptune.new as neptune
+
+        self._neptune = neptune
+        self._initialized = False
+        self._log_artifacts = False
+
+    def setup(self, args, state, model):
+        """
+        Setup the Neptune integration.
+
+        Environment:
+            NEPTUNE_PROJECT (:obj:`str`, `required`):
+                The project ID for neptune.ai account. Should be in format `workspace_name/project_name`
+            NEPTUNE_API_TOKEN (:obj:`str`, `required`):
+                API-token for neptune.ai account
+            NEPTUNE_CONNECTION_MODE (:obj:`str`, `optional`):
+                Neptune connection mode. `async` by default
+            NEPTUNE_RUN_NAME (:obj:`str`, `optional`):
+                The name of run process on Neptune dashboard
+        """
+        if state.is_world_process_zero:
+            self._neptune_run = self._neptune.init(
+                project=os.getenv("NEPTUNE_PROJECT"),
+                api_token=os.getenv("NEPTUNE_API_TOKEN"),
+                mode=os.getenv("NEPTUNE_CONNECTION_MODE", "async"),
+                name=os.getenv("NEPTUNE_RUN_NAME", None),
+            )
+            combined_dict = args.to_dict()
+            if hasattr(model, "config") and model.config is not None:
+                model_config = model.config.to_dict()
+                combined_dict = {**model_config, **combined_dict}
+            self._neptune_run["parameters"] = combined_dict
+        self._initialized = True
+
+    def on_train_begin(self, args, state, control, model=None, **kwargs):
+        if not self._initialized:
+            self.setup(args, state, model)
+
+    def on_log(self, args, state, control, logs, model=None, **kwargs):
+        if not self._initialized:
+            self.setup(args, state, model)
+        if state.is_world_process_zero:
+            for k, v in logs.items():
+                self._neptune_run[k].log(v, step=state.global_step)
+
+    def __del__(self):
+        """
+        Environment:
+            NEPTUNE_STOP_TIMEOUT (:obj:`int`, `optional`):
+                Number of seconsds to wait for all Neptune.ai tracking calls to finish, before stopping the tracked
+                run. If not set it will wait for all tracking calls to finish.
+        """
+        try:
+            stop_timeout = os.getenv("NEPTUNE_STOP_TIMEOUT")
+            stop_timeout = int(stop_timeout) if stop_timeout else None
+            self._neptune_run.stop(seconds=stop_timeout)
+        except AttributeError:
+            pass
+
+
 INTEGRATION_TO_CALLBACK = {
     "azure_ml": AzureMLCallback,
     "comet_ml": CometCallback,
     "mlflow": MLflowCallback,
+    "neptune": NeptuneCallback,
     "tensorboard": TensorBoardCallback,
     "wandb": WandbCallback,
 }

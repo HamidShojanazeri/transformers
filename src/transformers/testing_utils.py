@@ -26,6 +26,9 @@ from io import StringIO
 from pathlib import Path
 from typing import Iterator, Union
 
+from transformers import logging as transformers_logging
+
+from .deepspeed import is_deepspeed_available
 from .file_utils import (
     is_datasets_available,
     is_faiss_available,
@@ -49,6 +52,11 @@ SMALL_MODEL_IDENTIFIER = "julien-c/bert-xsmall-dummy"
 DUMMY_UNKWOWN_IDENTIFIER = "julien-c/dummy-unknown"
 DUMMY_DIFF_TOKENIZER_IDENTIFIER = "julien-c/dummy-diff-tokenizer"
 # Used to test Auto{Config, Model, Tokenizer} model_type detection.
+
+# Used to test the hub
+USER = "__DUMMY_TRANSFORMERS_USER__"
+PASS = "__DUMMY_TRANSFORMERS_PASS__"
+ENDPOINT_STAGING = "https://moon-staging.huggingface.co"
 
 
 def parse_flag_from_env(key, default=False):
@@ -84,6 +92,7 @@ _run_slow_tests = parse_flag_from_env("RUN_SLOW", default=False)
 _run_pt_tf_cross_tests = parse_flag_from_env("RUN_PT_TF_CROSS_TESTS", default=False)
 _run_pt_flax_cross_tests = parse_flag_from_env("RUN_PT_FLAX_CROSS_TESTS", default=False)
 _run_custom_tokenizers = parse_flag_from_env("RUN_CUSTOM_TOKENIZERS", default=False)
+_run_staging = parse_flag_from_env("HUGGINGFACE_CO_STAGING", default=False)
 _run_pipeline_tests = parse_flag_from_env("RUN_PIPELINE_TESTS", default=False)
 _run_git_lfs_tests = parse_flag_from_env("RUN_GIT_LFS_TESTS", default=False)
 _tf_gpu_memory_limit = parse_int_from_env("TF_GPU_MEMORY_LIMIT", default=None)
@@ -144,6 +153,23 @@ def is_pipeline_test(test_case):
             return test_case
         else:
             return pytest.mark.is_pipeline_test()(test_case)
+
+
+def is_staging_test(test_case):
+    """
+    Decorator marking a test as a staging test.
+
+    Those tests will run using the staging environment of huggingface.co instead of the real model hub.
+    """
+    if not _run_staging:
+        return unittest.skip("test is staging test")(test_case)
+    else:
+        try:
+            import pytest  # We don't need a hard dependency on pytest in the main library
+        except ImportError:
+            return test_case
+        else:
+            return pytest.mark.is_staging_test()(test_case)
 
 
 def slow(test_case):
@@ -361,9 +387,12 @@ if is_torch_available():
 else:
     torch_device = None
 
+if is_tf_available():
+    import tensorflow as tf
+
 
 def require_torch_gpu(test_case):
-    """Decorator marking a test that requires CUDA and PyTorch. """
+    """Decorator marking a test that requires CUDA and PyTorch."""
     if torch_device != "cuda":
         return unittest.skip("test requires CUDA")(test_case)
     else:
@@ -422,6 +451,16 @@ def require_soundfile(test_case):
     """
     if not is_soundfile_availble():
         return unittest.skip("test requires soundfile")(test_case)
+    else:
+        return test_case
+
+
+def require_deepspeed(test_case):
+    """
+    Decorator marking a test that requires deepspeed
+    """
+    if not is_deepspeed_available():
+        return unittest.skip("test requires deepspeed")(test_case)
     else:
         return test_case
 
@@ -567,14 +606,14 @@ class CaptureStd:
 
 
 class CaptureStdout(CaptureStd):
-    """ Same as CaptureStd but captures only stdout """
+    """Same as CaptureStd but captures only stdout"""
 
     def __init__(self):
         super().__init__(err=False)
 
 
 class CaptureStderr(CaptureStd):
-    """ Same as CaptureStd but captures only stderr """
+    """Same as CaptureStd but captures only stderr"""
 
     def __init__(self):
         super().__init__(out=False)
@@ -620,6 +659,26 @@ class CaptureLogger:
 
     def __repr__(self):
         return f"captured: {self.out}\n"
+
+
+@contextlib.contextmanager
+def LoggingLevel(level):
+    """
+    This is a context manager to temporarily change transformers modules logging level to the desired value and have it
+    restored to the original setting at the end of the scope.
+
+    For example ::
+
+        with LoggingLevel(logging.INFO):
+            AutoModel.from_pretrained("gpt2") # calls logger.info() several times
+
+    """
+    orig_level = transformers_logging.get_verbosity()
+    try:
+        transformers_logging.set_verbosity(level)
+        yield
+    finally:
+        transformers_logging.set_verbosity(orig_level)
 
 
 @contextlib.contextmanager
@@ -1174,3 +1233,32 @@ def execute_subprocess_async(cmd, env=None, stdin=None, timeout=180, quiet=False
         raise RuntimeError(f"'{cmd_str}' produced no output.")
 
     return result
+
+
+def nested_simplify(obj, decimals=3):
+    """
+    Simplifies an object by rounding float numbers, and downcasting tensors/numpy arrays to get simple equality test
+    within tests.
+    """
+    import numpy as np
+
+    from transformers.tokenization_utils import BatchEncoding
+
+    if isinstance(obj, list):
+        return [nested_simplify(item, decimals) for item in obj]
+    elif isinstance(obj, np.ndarray):
+        return nested_simplify(obj.tolist())
+    elif isinstance(obj, (dict, BatchEncoding)):
+        return {nested_simplify(k, decimals): nested_simplify(v, decimals) for k, v in obj.items()}
+    elif isinstance(obj, (str, int, np.int64)):
+        return obj
+    elif is_torch_available() and isinstance(obj, torch.Tensor):
+        return nested_simplify(obj.tolist(), decimals)
+    elif is_tf_available() and tf.is_tensor(obj):
+        return nested_simplify(obj.numpy().tolist())
+    elif isinstance(obj, float):
+        return round(obj, decimals)
+    elif isinstance(obj, np.float32):
+        return nested_simplify(obj.item(), decimals)
+    else:
+        raise Exception(f"Not supported: {type(obj)}")

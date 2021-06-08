@@ -1,4 +1,3 @@
-# coding=utf-8
 # Copyright 2021 The HuggingFace Inc. team. All rights reserved.
 # Copyright 2021 NVIDIA Corporation. All rights reserved.
 #
@@ -265,7 +264,6 @@ class MegatronBertModelTester:
 
 
 @require_torch
-@unittest.skip("Temporary skip to make the CI pass reliably.")
 class MegatronBertModelTest(ModelTesterMixin, unittest.TestCase):
 
     all_model_classes = (
@@ -283,6 +281,7 @@ class MegatronBertModelTest(ModelTesterMixin, unittest.TestCase):
         if is_torch_available()
         else ()
     )
+    fx_ready_model_classes = all_model_classes
 
     # test_resize_embeddings = False
     test_head_masking = False
