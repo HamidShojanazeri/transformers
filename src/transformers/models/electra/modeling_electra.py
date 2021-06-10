@@ -195,7 +195,6 @@ class ElectraEmbeddings(nn.Module):
         if position_ids is None:
             if hasattr(self, "position_ids"):
                 position_ids = self.position_ids[:, past_key_values_length : seq_length + past_key_values_length]
-                position_ids1 = torch.arange(seq_length).expand((1, -1))
 
             else:
                 position_ids = torch.arange(seq_length).expand((1, -1))
