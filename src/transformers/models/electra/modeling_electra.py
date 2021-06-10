@@ -22,6 +22,7 @@ from typing import Optional, Tuple
 import torch
 import torch.nn as nn
 import torch.utils.checkpoint
+from packaging import version
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 
 from ...activations import ACT2FN, get_activation
@@ -165,10 +166,20 @@ class ElectraEmbeddings(nn.Module):
         # any TensorFlow checkpoint file
         self.LayerNorm = nn.LayerNorm(config.embedding_size, eps=config.layer_norm_eps)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
-
-        # position_ids (1, len position emb) is contiguous in memory and exported when serialized
-        self.register_buffer("position_ids", torch.arange(config.max_position_embeddings).expand((1, -1)))
         self.position_embedding_type = getattr(config, "position_embedding_type", "absolute")
+        if version.parse(torch.__version__) > version.parse("1.6.0"):
+
+            # position_ids (1, len position emb) is contiguous in memory and exported when serialized
+
+            self.register_buffer(
+                "position_ids", torch.arange(config.max_position_embeddings).expand((1, -1)), persistent=False
+            )
+
+            self.register_buffer(
+                "token_type_ids",
+                torch.zeros(self.position_ids.size(), dtype=torch.long, device=self.position_ids.device),
+                persistent=False,
+            )
 
     # Copied from transformers.models.bert.modeling_bert.BertEmbeddings.forward
     def forward(
@@ -182,10 +193,24 @@ class ElectraEmbeddings(nn.Module):
         seq_length = input_shape[1]
 
         if position_ids is None:
-            position_ids = self.position_ids[:, past_key_values_length : seq_length + past_key_values_length]
+            if hasattr(self, "position_ids"):
+                position_ids = self.position_ids[:, past_key_values_length : seq_length + past_key_values_length]
+                position_ids1 = torch.arange(seq_length).expand((1, -1))
+
+            else:
+                position_ids = torch.arange(seq_length).expand((1, -1))
 
         if token_type_ids is None:
-            token_type_ids = torch.zeros(input_shape, dtype=torch.long, device=self.position_ids.device)
+            if hasattr(self, "token_type_ids"):
+                token_type_ids = self.token_type_ids[:, :seq_length]
+
+        # Setting the token_type_ids to the registered buffer in constructor where it is all zeros, which usually occurs
+        # when its auto-generated, registered buffer helps users when tracing the model without passing token_type_ids, solves
+        # issue #5664
+
+        elif token_type_ids is not None and len(torch.nonzero(token_type_ids)) < 1:
+            if hasattr(self, "token_type_ids"):
+                token_type_ids = self.token_type_ids[:, :seq_length]
 
         if inputs_embeds is None:
             inputs_embeds = self.word_embeddings(input_ids)
