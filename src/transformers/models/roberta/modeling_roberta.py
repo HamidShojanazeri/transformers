@@ -126,6 +126,10 @@ class RobertaEmbeddings(nn.Module):
             if hasattr(self, "token_type_ids"):
                 token_type_ids = self.token_type_ids[:, :seq_length]
 
+        # Setting the token_type_ids to the registered buffer in constructor where it is all zeros, which usually occurs
+        # when its auto-generated, registered buffer helps users when tracing the model without passing token_type_ids, solves
+        # issue #5664
+
         elif token_type_ids is not None and len(torch.nonzero(token_type_ids)) < 1:
             if hasattr(self, "token_type_ids"):
                 token_type_ids = self.token_type_ids[:, :seq_length]
