@@ -21,6 +21,7 @@ import torch
 import torch.nn as nn
 import torch.utils.checkpoint
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
+from packaging import version
 
 from ...activations import ACT2FN, gelu
 from ...file_utils import (
@@ -88,12 +89,12 @@ class RobertaEmbeddings(nn.Module):
             self.register_buffer("position_ids", torch.arange(config.max_position_embeddings).expand((1, -1)))
 
             self.register_buffer(
-                "token_type_ids",
-                torch.zeros(self.position_ids.size(), dtype=torch.long, device=self.position_ids.device),
-                persistent=False,
-            )
+                    "token_type_ids",
+                    torch.zeros(self.position_ids.size(), dtype=torch.long, device=self.position_ids.device),
+                    persistent=False,
+                )
         self.position_embedding_type = getattr(config, "position_embedding_type", "absolute")
-
+        
         # End copy
         self.padding_idx = config.pad_token_id
         self.position_embeddings = nn.Embedding(
@@ -113,21 +114,22 @@ class RobertaEmbeddings(nn.Module):
             else:
                 self.position_ids = self.create_position_ids_from_inputs_embeds(inputs_embeds)
                 position_ids = self.position_ids
-
+                
         if input_ids is not None:
             input_shape = input_ids.size()
         else:
             input_shape = inputs_embeds.size()[:-1]
-
+            
         seq_length = input_shape[1]
-
+        
         if token_type_ids is None:
             if hasattr(self, "token_type_ids"):
                 token_type_ids = self.token_type_ids[:, :seq_length]
-
+            
         elif token_type_ids is not None and len(torch.nonzero(token_type_ids)) < 1:
             if hasattr(self, "token_type_ids"):
                 token_type_ids = self.token_type_ids[:, :seq_length]
+
 
         if inputs_embeds is None:
             inputs_embeds = self.word_embeddings(input_ids)
