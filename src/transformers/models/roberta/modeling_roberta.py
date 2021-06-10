@@ -84,7 +84,14 @@ class RobertaEmbeddings(nn.Module):
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
 
         # position_ids (1, len position emb) is contiguous in memory and exported when serialized
-        self.register_buffer("position_ids", torch.arange(config.max_position_embeddings).expand((1, -1)))
+        if version.parse(torch.__version__) > version.parse("1.6.0"):
+            self.register_buffer("position_ids", torch.arange(config.max_position_embeddings).expand((1, -1)))
+
+            self.register_buffer(
+                "token_type_ids",
+                torch.zeros(self.position_ids.size(), dtype=torch.long, device=self.position_ids.device),
+                persistent=False,
+            )
         self.position_embedding_type = getattr(config, "position_embedding_type", "absolute")
 
         # End copy
@@ -99,19 +106,28 @@ class RobertaEmbeddings(nn.Module):
         if position_ids is None:
             if input_ids is not None:
                 # Create the position ids from the input token ids. Any padded tokens remain padded.
-                position_ids = create_position_ids_from_input_ids(
+                self.position_ids = create_position_ids_from_input_ids(
                     input_ids, self.padding_idx, past_key_values_length
-                ).to(input_ids.device)
+                )
+                position_ids = self.position_ids
             else:
-                position_ids = self.create_position_ids_from_inputs_embeds(inputs_embeds)
+                self.position_ids = self.create_position_ids_from_inputs_embeds(inputs_embeds)
+                position_ids = self.position_ids
 
         if input_ids is not None:
             input_shape = input_ids.size()
         else:
             input_shape = inputs_embeds.size()[:-1]
 
+        seq_length = input_shape[1]
+
         if token_type_ids is None:
-            token_type_ids = torch.zeros(input_shape, dtype=torch.long, device=self.position_ids.device)
+            if hasattr(self, "token_type_ids"):
+                token_type_ids = self.token_type_ids[:, :seq_length]
+
+        elif token_type_ids is not None and len(torch.nonzero(token_type_ids)) < 1:
+            if hasattr(self, "token_type_ids"):
+                token_type_ids = self.token_type_ids[:, :seq_length]
 
         if inputs_embeds is None:
             inputs_embeds = self.word_embeddings(input_ids)
