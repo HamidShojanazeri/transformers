@@ -21,6 +21,7 @@ from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
+from packaging import version
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 
 from ...activations import ACT2FN
@@ -214,11 +215,14 @@ class AlbertEmbeddings(nn.Module):
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
 
         # position_ids (1, len position emb) is contiguous in memory and exported when serialized
-        self.register_buffer("position_ids", torch.arange(config.max_position_embeddings).expand((1, -1)))
         self.position_embedding_type = getattr(config, "position_embedding_type", "absolute")
-        self.register_buffer(
-            "token_type_ids", torch.zeros(self.position_ids.size(), dtype=torch.long, device=self.position_ids.device)
-        )
+
+        if version.parse(torch.__version__) > version.parse("1.6.0"):
+            self.register_buffer("position_ids", torch.arange(config.max_position_embeddings).expand((1, -1)))
+            self.register_buffer(
+                "token_type_ids",
+                torch.zeros(self.position_ids.size(), dtype=torch.long, device=self.position_ids.device),
+            )
 
     # Copied from transformers.models.bert.modeling_bert.BertEmbeddings.forward
     def forward(
@@ -237,11 +241,11 @@ class AlbertEmbeddings(nn.Module):
         if token_type_ids is None:
             token_type_ids = self.token_type_embeddings(token_type_ids)
 
-        """
-        Setting the token_type_ids to the registered buffer in constructor where it is all zeros, which usually occurs
-        when its auto-generated, registered buffer helps users when tracing the model without passing token_type_ids
-        """
-        if token_type_ids is not None and len(torch.nonzero(token_type_ids)) < 1:
+        # Setting the token_type_ids to the registered buffer in constructor where it is all zeros, which usually occurs
+        # when its auto-generated, registered buffer helps users when tracing the model without passing token_type_ids
+        # solves issue #5664
+
+        elif token_type_ids is not None and len(torch.nonzero(token_type_ids)) < 1:
 
             if hasattr(self, "token_type_ids"):
                 token_type_ids = self.token_type_ids[:, :seq_length]
