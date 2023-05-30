@@ -356,7 +356,7 @@ class T5Attention(nn.Module):
         self.n_heads = config.num_heads
         self.dropout = config.dropout_rate
         self.inner_dim = self.n_heads * self.key_value_proj_dim
-
+        self.tp_size = 2
         # Mesh TensorFlow initialization to avoid scaling before softmax
         self.q = nn.Linear(self.d_model, self.inner_dim, bias=False)
         self.k = nn.Linear(self.d_model, self.inner_dim, bias=False)
@@ -482,11 +482,11 @@ class T5Attention(nn.Module):
 
         def shape(states):
             """projection"""
-            return states.view(batch_size, -1, self.n_heads, self.key_value_proj_dim).transpose(1, 2)
+            return states.view(batch_size, -1, self.n_heads//self.tp_size, self.key_value_proj_dim).transpose(1, 2)
 
         def unshape(states):
             """reshape"""
-            return states.transpose(1, 2).contiguous().view(batch_size, -1, self.inner_dim)
+            return states.transpose(1, 2).contiguous().view(batch_size, -1, self.inner_dim//self.tp_size)
 
         def project(hidden_states, proj_layer, key_value_states, past_key_value):
             """projects hidden states correctly to key/query states"""
@@ -516,8 +516,10 @@ class T5Attention(nn.Module):
             return hidden_states
 
         # get query states
+        # print("query_states after shape ============================",query_states)
+        
         query_states = shape(self.q(hidden_states))  # (batch_size, n_heads, seq_length, dim_per_head)
-
+        # print(" 522: uery_states after shape ============================",query_states.size())
         # get key/value states
         key_states = project(
             hidden_states, self.k, key_value_states, past_key_value[0] if past_key_value is not None else None
@@ -530,16 +532,20 @@ class T5Attention(nn.Module):
         scores = torch.matmul(
             query_states, key_states.transpose(3, 2)
         )  # equivalent of torch.einsum("bnqd,bnkd->bnqk", query_states, key_states), compatible with onnx op>9
-
+        
+        position_bias_is_passed_in = False
         if position_bias is None:
             if not self.has_relative_attention_bias:
+                print("539: we are in not self.has_relative_attention_bias ==============")
                 position_bias = torch.zeros(
-                    (1, self.n_heads, real_seq_length, key_length), device=scores.device, dtype=scores.dtype
+                    (1, self.n_heads//self.tp_size, real_seq_length, key_length), device=scores.device, dtype=scores.dtype
                 )
                 if self.gradient_checkpointing and self.training:
                     position_bias.requires_grad = True
             else:
                 position_bias = self.compute_bias(real_seq_length, key_length, device=scores.device)
+                print("547: we are in self.compute_bias ==============")
+                
 
             # if key and values are already calculated
             # we want only the last query position bias
@@ -548,6 +554,8 @@ class T5Attention(nn.Module):
 
             if mask is not None:
                 position_bias = position_bias + mask  # (batch_size, n_heads, seq_length, key_length)
+        else:
+            position_bias_is_passed_in = True
 
         if self.pruned_heads:
             mask = torch.ones(position_bias.shape[1])
@@ -555,8 +563,32 @@ class T5Attention(nn.Module):
             position_bias_masked = position_bias[:, mask.bool()]
         else:
             position_bias_masked = position_bias
+            
+            
+        local_rank = int(os.environ['LOCAL_RANK'])
 
-        scores += position_bias_masked
+
+        # position_bias_masked = position_bias_masked[:, :n_heads // 2, :, :]
+        # rank = int(os.environ['RANK'])
+        # world_size = int(os.environ['WORLD_SIZE'])
+        tp_rank = local_rank % self.tp_size
+        
+        halved_position_bias_masked = position_bias_masked
+        if scores.size() != halved_position_bias_masked.size():
+            half_heads = position_bias_masked.chunk(2, dim=1)
+            halved_position_bias_masked= half_heads[tp_rank]
+        else:
+            print("passing in flag ", position_bias_is_passed_in)
+            
+        if scores.size() != halved_position_bias_masked.size():
+            print(f"L577 {query_states.size()}, {key_states.size()}, {value_states.size()}, after linear: {self.q(hidden_states).size()}, hidden state: {hidden_states.size()} {scores.size()}")
+        assert scores.size() == halved_position_bias_masked.size(), f": 578 socre size {scores.size()} not matching postion bias{halved_position_bias_masked.size()}, {hidden_states.size()}"
+        # print ( f" 565: score size{scores.size()=} and position size {halved_position_bias_masked.size()=} on rank {local_rank=} tp_rank{tp_rank=}, {hidden_states.size()}"  )
+        
+        
+        # print (" 569: halved_position_bias_masked ==================", halved_position_bias_masked.size())
+        
+        scores += halved_position_bias_masked
         attn_weights = nn.functional.softmax(scores.float(), dim=-1).type_as(
             scores
         )  # (batch_size, n_heads, seq_length, key_length)
