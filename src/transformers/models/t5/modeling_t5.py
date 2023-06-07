@@ -575,7 +575,7 @@ class T5Attention(nn.Module):
         
         halved_position_bias_masked = position_bias_masked
         if scores.size() != halved_position_bias_masked.size():
-            half_heads = position_bias_masked.chunk(2, dim=1)
+            half_heads = position_bias_masked.chunk(self.tp_size, dim=1)
             halved_position_bias_masked= half_heads[tp_rank]
         else:
             print("passing in flag ", position_bias_is_passed_in)
